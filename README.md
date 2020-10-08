@@ -1,1 +1,331 @@
-# My-Functions---Python
+# My_Functions_Python
+
+# Create pandas dataframe from a list of behavior features and a list of animal features, keeping track of where each feature came from.
+def dfs_new_withtracking (dfs_dictio_subsets, suffixes_behaviors, dfs_list_cowdata):
+    ''' Input:
+    - dfs_dictio_subsets: dictionary where it assigns a key to each dataframe containing sensor data.
+    - suffixes_behaviors: a list of the suffixes I will add to each variable in each dfs listed in the dictionary
+    - dfs_list_cowdata: a list of dataframes with the cow data
+    
+    The function adds the suffixes to all the column names in a dataframe using a for loop,
+    then, it merges multiple dataframes using reduce & merge, creating a dataframe containing 
+    sensor data only from all the behaviors. At the same time, merges multiple dataframes using
+    reduce & merge to create a dataframe that contains the cow variables (incluing the outcome
+    variable). Finally, it merges both dataframes, the one with the sensor data with the one with
+    cow data
+    
+    Output:
+    - a dataframe that contains the cow data and sensor data with a suffix at the end corresponding
+    to the behavior it came from'''
+    
+    # add suffixes
+    for i in dfs_dictio_subsets:
+        dfs_dictio_subsets[i] = dfs_dictio_subsets[i].add_suffix(suffixes_behaviors[i])
+        
+    
+    # merge the dfs with sensor data
+    temp = reduce(lambda left, right: pd.merge(left, right,
+                                               left_index = True, right_index = True,
+                                               how = 'outer'), dfs_dictio_subsets.values())
+    
+    # merge the dfs with cowdata
+    temp_i = reduce(lambda left, right: pd.merge(left, right,
+                                                 on = ['cow_x', 'date_time_x', 'metricheck_inc_or_sick_Lee'],
+                                                 how = 'outer'), dfs_list_cowdata)
+    
+    # merge cow data with sensor data
+    temp_ii = pd.merge(temp_i, temp, 
+                       left_index = True, right_index = True, 
+                       how = 'outer')
+    
+    return temp_ii
+    
+
+
+# Create two pandas dataframes, one with the features and one with the label. All missing observations are removed and data has been standardized
+# Step prior to fitting model
+def dataframe_features_sensorONLY(dataframe_name, label_var):
+    
+    ''' This function is to create a dataframe with all the features I will be needing later on
+    Inputs:
+    - dataframe that contains the label_variable or outcome, the sensor features in the list provided,
+       and the animal features provided in the list.
+    - the label variable, as string.
+    
+    Removes NaNs, and standardizes features (sensor values in this case).
+    
+    Output:
+    - two dataframes, one with the features and one with the cow data. 
+      It keeps the relationship with the index'''
+    
+    #1. Make sure all the missing values are np.nan and remove any rows with no outcome
+    df = dataframe_name.replace('missing', np.nan)
+    df = df.replace('NaN', np.nan)
+    df = df.loc[(df[label_var].notnull())]
+    
+    #2. Create dataframe with the sensor features and change them into floats
+    # so I can standardize later
+    df_sensor = df[list(df.iloc[:, 3:])]
+    for i in df_sensor:
+        df_sensor[i] = df_sensor[i].astype('float')
+    
+    
+    #3. Standardization of the sensor data, ignoring NaN. It will create a separate dataframe
+    df_std = pd.DataFrame()
+    for i in df_sensor:
+        df_std_i = df_sensor[[i]].apply(lambda x:(x - np.nanmean(x)) / (np.nanstd(x)))
+        df_std = pd.concat([df_std, df_std_i], axis = 1)
+    
+    
+    #4. Concatenation of all the dataframes, sensor, and other features
+    # create a list with the column names I will be using
+    columns = list(df_std)
+    
+    # create a dataframe where the index is same as the one from the standardized sensor values
+    # it needs some column to start with, so I create the 'fake' column
+    # I will use it to append new columns
+    df_sensorfeatures = pd.DataFrame(data = df_std.index)
+    df_sensorfeatures['fake'] = 1
+    df_sensorfeatures = df_sensorfeatures.set_index(0)
+    
+    
+    for i in columns:
+        df_i = df_std.loc[(df_std[i].notnull())][[i]]
+        df_sensorfeatures = df_sensorfeatures.join(df_i, how = 'inner')
+    
+    # and drop the first column
+    df_sensorfeatures = df_sensorfeatures.drop(columns = 'fake')
+    
+    
+    #5. Selecting the label: take the column with the label and match the indexes to a list of indexes
+    df_label = dataframe_name.loc[(dataframe_name[label_var].notnull())][[label_var]]
+    
+    list_index = df_sensorfeatures.index.values.tolist()
+    df_label = df_label.loc[list_index]
+    
+    return (df_sensorfeatures, df_label)
+    
+
+# Randomized Search for Random Forest using 3-fold cross validation across 100 different combinations, all cores
+def RandomForest_RandomizedSearchCV(features_df, label_df, randomsearch_grid):
+    
+    # create the base model to tune
+    rand_for = RandomForestClassifier(random_state = 42)
+    rand_for_random = RandomizedSearchCV(estimator = rand_for, 
+                                         param_distributions = randomsearch_grid, 
+                                         n_iter = 100, 
+                                         cv = 3, 
+                                         verbose = 2 , 
+                                         random_state = 42, 
+                                         n_jobs = -1)
+    
+    # fit random search model
+    rand_for_random.fit(features_df, label_df)
+    x = rand_for_random.best_params_
+    
+    return x
+    
+    
+    
+# Fit Random Forest model using the result from the randomized search as hyperparameters.
+
+# Model performance is evaluated using 5-fold cross validation instead of splitting the data into 
+# train and test datasets due to small sample size.
+
+# Return predicted class probabilities to use rank-based approach to classify between cases and non-cases
+# (unbalanced dataset with non-cases as the majority class).
+
+def RandomForest_sensorvalues(features_df, label_df, 
+                              bootstrap_bool, depth, features_max, 
+                              samples_leaf, samples_split, estimators_no):
+    
+    #1. Fit the model
+    rand_for = RandomForestClassifier(bootstrap = bootstrap_bool,
+                                      max_depth = depth,
+                                      max_features = features_max,
+                                      min_samples_leaf = samples_leaf,
+                                      min_samples_split = samples_split,
+                                      n_estimators = estimators_no, random_state = 42, oob_score = True)
+    
+    model = rand_for.fit(features_df, label_df)
+    oob_err = 1-(rand_for.oob_score_) # 1 - accuracy of the training dataset using an out-of-bag estimate = error
+    pred = rand_for.predict(features_df)
+    probs = rand_for.predict_proba(features_df)
+    accuracy = metrics.accuracy_score(label_df, pred)
+    
+    conf_matrix = metrics.confusion_matrix(label_df, pred)
+    classif_report = metrics.classification_report(label_df, pred)
+    
+    feature_imp = pd.Series(rand_for.feature_importances_, index = list(features_df)).sort_values(ascending = False)
+    
+    #2. Cross-Validation
+    cv_scores = cross_val_score(rand_for, features_df, label_df, cv = 5, scoring = 'neg_mean_squared_error')
+    rmse_scores = np.sqrt(-cv_scores)
+    cv_mean = rmse_scores.mean()
+    cv_std = rmse_scores.std()
+    
+    cv_labels_pred = cross_val_predict(rand_for, features_df, label_df, cv = 5)
+    cv_conf_matrix = metrics.confusion_matrix(label_df, cv_labels_pred)
+    cv_class_report = classification_report(label_df, cv_labels_pred)
+    
+    #3. Precision-Recall Curve
+    cv_y_scores = cross_val_predict(rand_for, features_df, label_df, cv = 5, method = 'predict_proba')
+    precision, recall, thresholds = metrics.precision_recall_curve(label_df, cv_y_scores[:,1]) # score = prob of positive class
+    auc_ROC = metrics.roc_auc_score(label_df, cv_y_scores[:, 1])
+    auc_PRcurve = metrics.auc(label_df, cv_y_scores[:, 1], reorder = True)
+    avg_prec = metrics.average_precision_score(label_df, cv_y_scores[:, 1])
+     
+    return [conf_matrix, 
+            classif_report, 
+            feature_imp, 
+            {'oob_err':oob_err, 
+             'model' : model, 
+             'accuracy' : accuracy},
+            {'true labels': label_df},
+            {'predicted': pred},
+            {'prob_predicted': probs},
+            {'rmse_scores':rmse_scores,
+             'cv_mean':cv_mean,
+             'cv_std':cv_std},
+            {'cv_conf_matrix':cv_conf_matrix},
+            {'cv_class_report':cv_class_report},
+            {'auc_ROC' : auc_ROC,
+             'auc_PRcurve': auc_PRcurve,
+             'avg precision' : avg_prec}]
+             
+             
+ # Convert classification report into pandas dataframe. 
+ # Extracting Precision, Recall, Specificity, Negative Predictive Value, and F1 score.
+ 
+ def classificationreport_to_df(report, behavior_var, time_aggreg, time_back):
+    df_classification = pd.DataFrame()
+    df_class_auc = pd.DataFrame()
+    
+    # Data frame with classification report
+    df_report_class = pd.DataFrame(report[0], index = [0])
+    df_report_class = df_report_class['cv_class_report'].replace('avg / total', 'avg/total')
+    df_report_class_lines = df_report_class.iloc[0].split('\n')
+    
+    line_2 = df_report_class_lines[2].split('      ')
+    line_3 = df_report_class_lines[3].split('      ')
+    line_5 = df_report_class_lines[5].split('      ')
+    
+    lines = [line_2, line_3, line_5]
+    my_lst = []
+    for i in lines:
+        my_lst.append(list(filter(None, i)))
+    
+    df_i = pd.DataFrame(my_lst, columns = ['class', 'cv_precision', 'cv_recall', 'cv_f1', 'support'])
+    df_i['behavior_var'] = behavior_var
+    df_i['time_aggreg'] = time_aggreg
+    df_i['time_back'] = time_back
+    df_classification = df_classification.append(df_i, ignore_index = True)
+    
+    # Extract the Se, Sp, PPV, NPV, from df_classification, for the class 0, class 1, and the F1 score from the total
+    # from the class 0 --> NPV, SP, n non-metritis events
+    df_class_0 = df_classification.loc[(df_classification['class'] == '  0.0')]
+    df_class_0.rename(columns = {"cv_precision":"NPV", "cv_recall":"Sp", "support":"non_metritis"}, inplace = True)
+    df_class_0.drop(columns = ['class', 'cv_f1'], inplace = True)
+    df_class_0.reset_index(inplace = True)
+    
+    # from the class 1 --> PPV, Se, n metritis events
+    df_class_1 = df_classification.loc[(df_classification['class'] == '  1.0')]
+    df_class_1.rename(columns = {"cv_precision":"PPV", "cv_recall":"Se", "support":"metritis"}, inplace = True)
+    df_class_1.drop(columns = ['class', 'cv_f1'], inplace = True)
+    df_class_1.reset_index(inplace = True)
+    
+    # for the class == avg/total --> F1-score
+    df_class_total = df_classification.loc[(df_classification['class'] == 'avg / total')]
+    df_class_total.rename(columns = {'cv_f1':'F1_score', "support":"Total_N"}, inplace = True)
+    df_class_total.drop(columns = ['class', 'cv_precision', 'cv_recall'], inplace = True)
+    df_class_total.reset_index(inplace = True)
+    
+    
+    # Data frame with AUCs from ROC, PRcurve, and average precision
+    df_report_auc = pd.DataFrame(report[1], index = [0])
+    df_report_auc['behavior_var'] = behavior_var
+    df_report_auc['time_aggreg'] = time_aggreg
+    df_report_auc['time_back'] = time_back
+    df_class_auc = df_class_auc.append(df_report_auc, ignore_index = True)
+    
+    
+    # and the last step, merge all 3 dfs that have been created from the classification report
+    dfs_tomerge_list = [df_class_0, df_class_1, df_class_total, df_class_auc]
+
+    df_merged = reduce(lambda left, right: pd.merge(left, right, 
+                                                    on = ['behavior_var', 'time_aggreg', 'time_back'],
+                                                    how = 'outer'), dfs_tomerge_list)
+    # Removing unnecessary columns
+    df_merged.drop(columns = ['index_x', 'index_y', 'index'], inplace = True)
+
+    # Computing general ccuracy
+    df_merged['Accuracy'] = ((((df_merged['Se'].astype('float'))*(df_merged['metritis'].astype('float'))) 
+                              + ((df_merged['Sp'].astype('float'))*(df_merged['non_metritis'].astype('float'))))
+                             /(df_merged['Total_N'].astype('float'))).round(2)
+
+
+    
+    #return (df_classification, df_class_auc)
+    return df_merged
+    
+
+# Get classifier performance based on ranked predicted class probabilities and
+# selecting my own cut-off points (top X percent will be classified as case (1)
+# while the rest will be classified as non-case (0)).
+
+def cutoff_probs (dictio_probs, top_percent):
+    
+    # Get predicted class
+    df_predicted_class = pd.DataFrame.from_dict(dictio_probs[1])
+
+    # Get true labels
+    df_true_labels_i = (dictio_probs[0].values())[0]
+    df_true_labels = df_true_labels_i.reset_index(inplace = False)
+
+    # Get classification probabilities
+    prob_predicted = dictio_probs[2].values()
+    prob_0 = [item[0] for item in prob_predicted[0]]
+    prob_1 = [item[1] for item in prob_predicted[0]]
+    prob_predicted_class = pd.DataFrame(list(zip(prob_0, prob_1)), 
+                                        columns = ['prob_class_0', 'prob_class_1'])
+    
+    # merge dfs and sort by probs for class 1
+    dfs_list = [df_true_labels, prob_predicted_class, df_predicted_class]
+
+    result = reduce(lambda left, right: pd.merge(left, right,
+                                                 left_index = True,
+                                                 right_index = True,
+                                                 how = 'outer'), dfs_list)
+    
+    df_prob_predicted_sorted = result.sort_values('prob_class_1', ascending = False)
+    
+    
+    # subsetting by the x percent highest
+    df_length = len(df_prob_predicted_sorted) # total number
+    top_Xpct = (top_percent * df_length)/100
+    testresult_positive = df_prob_predicted_sorted.iloc[0 : top_Xpct] # tested positive
+    
+    
+    # Se, SP, PPV, NPV calculations
+    TruePositives = float(len(testresult_positive.loc[(testresult_positive['metricheck_inc_or_sick_Lee'] == 1)]))
+    FalsePositives = float(len(testresult_positive.loc[(testresult_positive['metricheck_inc_or_sick_Lee'] == 0)]))
+    
+    diseased = float(len(df_prob_predicted_sorted.loc[(df_prob_predicted_sorted['metricheck_inc_or_sick_Lee'] == 1)]))
+    non_diseased = float(len(df_prob_predicted_sorted.loc[(df_prob_predicted_sorted['metricheck_inc_or_sick_Lee'] == 0)]))
+    
+    TrueNegatives = (non_diseased - FalsePositives)
+    FalseNegatives = (diseased - TruePositives)
+    
+    Se_Xpct = round((TruePositives / diseased) * 100, 2)
+    PPV_Xpct = round((TruePositives / (TruePositives + FalsePositives)) * 100, 2)
+
+    Sp_Xpct = round((TrueNegatives / non_diseased) * 100, 2)
+    NPV_Xpct = round((TrueNegatives / (TrueNegatives + FalseNegatives)) * 100, 2)
+    
+    Acc_Xpct = round(((TruePositives + TrueNegatives)/(TruePositives + FalsePositives + TrueNegatives + FalseNegatives))*100, 2)
+    
+    return ({'Se_'       + str(top_percent) + 'pct' : Se_Xpct,
+             'Sp_'       + str(top_percent) + 'pct' : Sp_Xpct,
+             'PPV_'      + str(top_percent) + 'pct' : PPV_Xpct,
+             'NPV_'      + str(top_percent) + 'pct' : NPV_Xpct,
+             'Accuracy_' + str(top_percent) + 'pct' : Acc_Xpct})
